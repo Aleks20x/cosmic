@@ -1,0 +1,1343 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Cosmic Eat: Escala Relativa V10.0 - Sistemas Orbitais</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; touch-action: none; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background-color: #000000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        canvas { display: block; width: 100%; height: 100%; }
+       
+        #ui-container { position: absolute; top: 15px; left: 15px; display: flex; flex-direction: column; gap: 8px; pointer-events: none; z-index: 15; }        
+        .hud-panel { background: rgba(15,15,30,0.85); color: #fff; padding: 10px 15px; border-radius: 6px; border: 1px solid #444477; font-weight: bold; pointer-events: auto; }
+       
+        #event-alert {
+            position: absolute;
+            top: 25px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255, 60, 0, 0.2);
+            color: #ff5500;
+            border: 2px solid #ff3c00;
+            padding: 12px 30px;
+            border-radius: 8px;
+            font-size: 20px;
+            font-weight: bold;
+            letter-spacing: 2px;
+            text-shadow: 0 0 10px rgba(255, 60, 0, 0.8);
+            box-shadow: inset 0 0 15px rgba(255, 60, 0, 0.3), 0 0 20px rgba(255, 60, 0, 0.2);
+            pointer-events: none;
+            z-index: 18;
+            opacity: 0;
+            transition: opacity 0.5s ease;
+            animation: pulse-alert 1.5s infinite alternate;
+        }
+
+        @keyframes pulse-alert {
+            0% { box-shadow: inset 0 0 15px rgba(255,60,0,0.3), 0 0 10px rgba(255,60,0,0.2); }
+            100% { box-shadow: inset 0 0 25px rgba(255,60,0,0.5), 0 0 30px rgba(255,60,0,0.6); color: #ff9900; }
+        }
+       
+        #game-over-screen { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(5, 5, 15, 0.85); backdrop-filter: blur(8px); flex-direction: column; justify-content: center; align-items: center; color: #ff3366; font-size: 32px; font-weight: bold; z-index: 20; }
+        .btn-restart { margin-top: 20px; background: #ff3366; color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 6px; cursor: pointer; font-weight: bold; box-shadow: 0 0 15px rgba(255,51,102,0.4); }
+    </style>
+</head>
+<body>
+    <div id="game-over-screen">
+        <div>VOCÊ FOI CONSUMIDO!</div>
+        <button class="btn-restart" id="btn-restart">Tentar Novamente</button>
+    </div>
+   
+    <div id="ui-container">
+        <div class="hud-panel">
+            Sua Massa: <span id="player-mass-hud" style="color: #00ffcc;">50</span>
+        </div>
+    </div>
+
+    <div id="event-alert">AVISO: VENTO ESTELAR DETECTADO</div>
+   
+    <canvas id="galaxyCanvas"></canvas>
+    <script>
+        const canvas = document.getElementById('galaxyCanvas');
+        const ctx = canvas.getContext('2d');
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        const G = 0.15;
+        const SOFTENING = 12;
+        const ARENA_RADIUS = 5000;
+        const SAFE_SPAWN_DISTANCE = 1000; // Distância mínima para nada spawnar em cima do player
+
+        let gameOver = false;
+        let camera = { x: 0, y: 0, zoom: 0.8 };
+        let bodies = [];
+        let shockwaves = [];
+        let player = null;
+        let keys = {};
+       
+        let clickTarget = { x: 0, y: 0, active: false };
+        let pairCounter = 0;
+        let rgbTime = 0;
+
+        let solarWind = {
+            active: false,
+            pos: -ARENA_RADIUS,
+            direction: 'LEFT_TO_RIGHT',
+            speed: 2400,
+            force: 350,
+            timerNextEvent: 180.0,
+            alertDuration: 3.5,
+            alertTimer: 0
+        };
+
+        class Shockwave {
+            constructor(x, y, maxRadius, force) {
+                this.x = x;
+                this.y = y;
+                this.currentRadius = 10;
+                this.maxRadius = maxRadius;
+                this.force = force;
+                this.duration = 1200;
+                this.elapsed = 0;
+                this.alpha = 1;
+            }
+
+            update(deltaTime) {
+                this.elapsed += deltaTime;
+                let progress = Math.min(1, this.elapsed / this.duration);
+                this.currentRadius = 10 + (this.maxRadius - 10) * progress;
+                this.alpha = 1 - progress;
+                return this.elapsed < this.duration;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.globalCompositeOperation = 'lighter';
+                ctx.shadowBlur = 40;
+                ctx.shadowColor = 'rgba(255, 130, 0, 1)';
+               
+                let gradient = ctx.createRadialGradient(this.x, this.y, this.currentRadius * 0.7, this.x, this.y, this.currentRadius);
+                gradient.addColorStop(0, 'rgba(255, 255, 200, 0)');
+                gradient.addColorStop(0.4, `rgba(255, 140, 0, ${this.alpha * 0.7})`);
+                gradient.addColorStop(0.8, `rgba(255, 60, 0, ${this.alpha * 0.95})`);
+                gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+                ctx.strokeStyle = gradient;
+                ctx.lineWidth = 24 * (1 - (this.elapsed / this.duration) * 0.7);
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.currentRadius, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+
+        class Body {
+            constructor(x, y, vx, vy, mass, type = 'particle') {
+                this.x = x;
+                this.y = y;
+                this.vx = vx;
+                this.vy = vy;
+                this.mass = Math.max(0.1, mass);
+                this.initialMass = this.mass;
+                this.type = type;
+                this.distortionX = 1;
+                this.distortionY = 1;
+                this.distortionAngle = 0;
+                this.trail = [];
+                this.alpha = 1;
+                this.isBeingAbsorbed = false;
+                this.absorberTarget = null;
+                this.initialAbsorbedRadius = 0;
+                this.absorptionAngleOffset = 0;
+               
+                this.beamAngle = Math.random() * Math.PI * 2;
+                this.beamSpeed = 1.5 + Math.random() * 1.0;
+
+                this.nebulaNuclei = [];
+                this.nebulaMaxRadius = 0;
+
+                this.wormholeLabel = '';
+                this.targetWormhole = null;
+                this.wormholeCooldown = 0;
+                this.isCollapsing = false;
+                this.collapseTimer = 0;
+                this.wormholePairId = null;
+
+                this.orbitTarget = null;
+                this.orbitRadius = 0;
+                this.orbitAngle = Math.random() * Math.PI * 2;
+                this.orbitSpeed = 0.5;
+
+                this.diskRotation = Math.random() * Math.PI * 2;
+                this.radius = 30;
+                this.assignColor();
+                this.isMassive = (type === 'black_hole' || type === 'player' || type === 'white_hole' || type === 'star' || type === 'blue_giant' || type === 'pulsar' || type === 'nebula' || type === 'wormhole' || type === 'proton_star' || type === 'planet' || type === 'saturn');
+               
+                if (this.type === 'nebula') {
+                    this.initNebulaShape();
+                }
+
+                if (this.type === 'particle' || this.type === 'supernova_particle' || this.type === 'comet') {
+                    this.maxLifespan = this.type === 'supernova_particle' ? 1.0 + Math.random() * 1.2 : (this.type === 'comet' ? Infinity : 15.0 + Math.random() * 5.0);
+                    this.lifespan = this.maxLifespan;
+                }
+            }
+
+            initNebulaShape() {
+                let numNuclei = 6 + Math.floor(Math.random() * 5);
+                let baseSize = Math.max(10, this.mass);
+                this.nebulaNuclei = [];
+
+                for (let i = 0; i < numNuclei; i++) {
+                    let angle = (i / numNuclei) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
+                    let dist = (baseSize * 0.15) + Math.random() * (baseSize * 0.4);
+                    let nucleusRadius = (baseSize * 0.35) + Math.random() * (baseSize * 0.35);
+                   
+                    this.nebulaNuclei.push({
+                        relX: Math.cos(angle) * dist,
+                        relY: Math.sin(angle) * dist,
+                        radius: nucleusRadius,
+                        initialRadius: nucleusRadius,
+                        initialRelX: Math.cos(angle) * dist,
+                        initialRelY: Math.sin(angle) * dist,
+                        alphaMult: 0.07 + Math.random() * 0.05
+                    });
+
+                    let extreme = dist + nucleusRadius;
+                    if (extreme > this.nebulaMaxRadius) this.nebulaMaxRadius = extreme;
+                }
+            }
+
+            updateRadius(maiorMassaGlobal = 50) {
+                if (this.isBeingAbsorbed) return;
+
+                let proporcao = this.mass / maiorMassaGlobal;
+                if (proporcao > 1) proporcao = 1;
+
+                let raioMax = 70;
+                let raioMin = 12;
+
+                if (this.type === 'particle' || this.type === 'supernova_particle') {
+                    this.radius = 3.5;
+                } else if (this.type === 'comet') {
+                    this.radius = 5.5;
+                } else if (this.type === 'star') {
+                    this.radius = raioMin + (55 - raioMin) * proporcao;
+                } else if (this.type === 'blue_giant') {
+                    this.radius = raioMin + (75 - raioMin) * proporcao;
+                } else if (this.type === 'black_hole' || this.type === 'player') {
+                    this.radius = raioMin + (raioMax - raioMin) * proporcao;
+                } else if (this.type === 'white_hole') {
+                    this.radius = raioMin + (45 - raioMin) * proporcao;
+                } else if (this.type === 'proton_star') {
+                    this.radius = raioMin + (38 - raioMin) * proporcao;
+                } else if (this.type === 'pulsar') {
+                    this.radius = raioMin + (50 - raioMin) * proporcao;
+                } else if (this.type === 'planet') {
+                    this.radius = raioMin + (28 - raioMin) * proporcao;
+                } else if (this.type === 'saturn') {
+                    this.radius = raioMin + (35 - raioMin) * proporcao;
+                } else if (this.type === 'moon') {
+                    this.radius = Math.max(6, 10 * proporcao);
+                } else if (this.type === 'nebula') {
+                    let escalaNebula = Math.min(1, Math.max(0.001, this.mass) / maiorMassaGlobal);
+                    this.radius = Math.max(30, 150 * escalaNebula);
+                   
+                    for (let nucleus of this.nebulaNuclei) {
+                        nucleus.radius = nucleus.initialRadius * escalaNebula;
+                        nucleus.relX = nucleus.initialRelX * escalaNebula;
+                        nucleus.relY = nucleus.initialRelY * escalaNebula;
+                    }
+                    this.nebulaMaxRadius = this.radius * 1.5;
+                } else if (this.type === 'wormhole') {
+                    this.radius = Math.max(55, 155 * (this.mass / maiorMassaGlobal));
+                }
+            }
+
+            assignColor() {
+                if (this.type === 'star') {
+                    if (this.isCollapsing) { this.colorRGB = "255, 51, 51"; this.color = '#ff3333'; }
+                    else { this.colorRGB = "255, 204, 0"; this.color = '#ffcc00'; }
+                    return;
+                }
+                if (this.type === 'blue_giant') {
+                    if (this.isCollapsing) { this.colorRGB = "255, 51, 51"; this.color = '#ff3333'; }
+                    else { this.colorRGB = "0, 160, 255"; this.color = '#00a0ff'; }
+                    return;
+                }
+                if (this.type === 'comet') { this.colorRGB = "180, 220, 255"; this.color = "rgba(180, 220, 255, 0.85)"; return; }
+                if (this.type === 'black_hole') { this.colorRGB = "0, 0, 0"; this.color = '#000000'; return; }
+                if (this.type === 'player') { this.colorRGB = "0, 0, 0"; this.color = '#000000'; return; }
+                if (this.type === 'white_hole') { this.colorRGB = "255, 255, 255"; this.color = '#ffffff'; return; }
+                if (this.type === 'proton_star') { this.colorRGB = "0, 240, 255"; this.color = '#00f0ff'; return; }
+                if (this.type === 'pulsar') { this.colorRGB = "120, 60, 255"; this.color = '#783cff'; return; }
+                if (this.type === 'planet') { this.colorRGB = "0, 255, 150"; this.color = '#00ff96'; return; }
+                if (this.type === 'saturn') { this.colorRGB = "235, 160, 80"; this.color = '#eba050'; return; }
+                if (this.type === 'moon') { this.colorRGB = "170, 170, 180"; this.color = '#aaaaaa'; return; }
+                if (this.type === 'nebula') { this.colorRGB = "0, 200, 255"; this.color = 'rgba(0, 200, 255, 0.04)'; return; }
+                if (this.type === 'wormhole') { this.colorRGB = "0, 255, 200"; this.color = 'rgba(0, 255, 200, 0.15)'; return; }
+                if (this.type === 'supernova_particle') {
+                    const r = 255; const g = Math.floor(Math.random() * 180) + 75; const b = Math.floor(Math.random() * 50);
+                    this.colorRGB = `${r}, ${g}, ${b}`; this.color = `rgba(${this.colorRGB}, 1)`; return;
+                }
+               
+                const r = Math.floor(Math.random() * 155) + 100;
+                const g = Math.floor(Math.random() * 155) + 100;
+                const b = Math.floor(Math.random() * 255);
+                this.colorRGB = `${r}, ${g}, ${b}`;
+                this.color = `rgba(${this.colorRGB}, 1)`;
+            }
+        }
+
+        function initGame() {
+            bodies = [];
+            shockwaves = [];
+            gameOver = false;
+            clickTarget.active = false;
+            clickTarget.x = 0;
+            clickTarget.y = 0;
+            pairCounter = 0;
+            rgbTime = 0;
+            keys = {};
+
+            solarWind.active = false;
+            solarWind.timerNextEvent = 180.0;
+            solarWind.alertTimer = 0;
+            document.getElementById('event-alert').style.opacity = '0';
+            document.getElementById('game-over-screen').style.display = 'none';
+           
+            player = new Body(0, 0, 0, 0, 50, 'player');
+            bodies.push(player);
+           
+            let initialZoom = Math.min(0.8, 4000 / ARENA_RADIUS);
+            camera = { x: 0, y: 0, zoom: initialZoom };
+
+            // Força o spawn inicial a respeitar a distância de segurança
+            for (let i = 0; i < 35; i++) { spawnDynamicBody(true); }
+            for (let i = 0; i < 5; i++) { spawnSafeBot(true); }
+            for (let i = 0; i < 10; i++) { spawnComet(); }
+
+            spawnBinarySystem();
+            spawnBinarySystem();
+
+            let mRef = player.mass;
+            bodies.push(new Body(ARENA_RADIUS * 0.4, -ARENA_RADIUS * 0.3, 4.0, -2.0, mRef * 15, 'nebula'));
+            bodies.push(new Body(-ARENA_RADIUS * 0.3, ARENA_RADIUS * 0.4, -5.0, 5.0, mRef * 0.9, 'pulsar'));
+           
+            spawnWormholePair();
+            spawnOrbitalSystems();
+            recalcularTodosOsRaios();
+        }
+
+        function obterMaiorMassaGeral() {
+            let maiorMassa = 50;
+            for (let i = 0; i < bodies.length; i++) {
+                if (bodies[i].type !== 'nebula' && bodies[i].type !== 'wormhole' && bodies[i].mass > maiorMassa) {
+                    maiorMassa = bodies[i].mass;
+                }
+            }
+            return maiorMassa;
+        }
+
+        function obterUltimoDoRankBH() {
+            let menorMassa = Infinity;
+            let encontrou = null;
+            for (let i = 0; i < bodies.length; i++) {
+                let b = bodies[i];
+                if ((b.type === 'black_hole' || b.type === 'player') && !b.isBeingAbsorbed) {
+                    if (b.mass < menorMassa) { menorMassa = b.mass; encontrou = b; }
+                }
+            }
+            return encontrou;
+        }
+
+        function recalcularTodosOsRaios() {
+            if (bodies.length === 0) return;
+            let maiorMassa = obterMaiorMassaGeral();
+            for (let i = 0; i < bodies.length; i++) {
+                bodies[i].updateRadius(maiorMassa);
+            }
+        }
+
+        function spawnWormholePair() {
+            if (!player) return;
+            pairCounter++;
+            let currentPairId = Math.random().toString(36).substr(2, 9);
+
+            let angle1 = Math.random() * Math.PI * 2;
+            let dist1 = ARENA_RADIUS * 0.25 + Math.random() * (ARENA_RADIUS * 0.25);
+            let xA = Math.cos(angle1) * dist1;
+            let yA = Math.sin(angle1) * dist1;
+
+            let angle2 = angle1 + Math.PI + (Math.random() - 0.5) * 0.5;
+            let dist2 = ARENA_RADIUS * 0.5 + Math.random() * (ARENA_RADIUS * 0.35);
+            let xB = Math.cos(angle2) * dist2;
+            let yB = Math.sin(angle2) * dist2;
+
+            let massA = 90 + Math.random() * 30;
+            let massB = 90 + Math.random() * 30;
+
+            let wA = new Body(xA, yA, (Math.random()-0.5)*15, (Math.random()-0.5)*15, massA, 'wormhole');
+            let wB = new Body(xB, yB, (Math.random()-0.5)*15, (Math.random()-0.5)*15, massB, 'wormhole');
+
+            wA.wormholeLabel = `W-A${pairCounter}`;
+            wB.wormholeLabel = `W-B${pairCounter}`;
+            wA.wormholePairId = currentPairId;
+            wB.wormholePairId = currentPairId;
+            wA.targetWormhole = wB;
+            wB.targetWormhole = wA;
+
+            bodies.push(wA, wB);
+        }
+
+        function spawnComet() {
+            let x, y, distToPlayer;
+            let maxTentativas = 20;
+            
+            // Garante distância segura também para cometas dinâmicos
+            do {
+                let angle = Math.random() * Math.PI * 2;
+                let dist = Math.random() * (ARENA_RADIUS - 200);
+                x = Math.cos(angle) * dist;
+                y = Math.sin(angle) * dist;
+                distToPlayer = player ? Math.sqrt((x - player.x)**2 + (y - player.y)**2) : Infinity;
+                maxTentativas--;
+            } while(distToPlayer < SAFE_SPAWN_DISTANCE && maxTentativas > 0);
+
+            let speed = 250 + Math.random() * 200;
+            let moveAngle = Math.random() * Math.PI * 2;
+            let vx = Math.cos(moveAngle) * speed;
+            let vy = Math.sin(moveAngle) * speed;
+
+            let referenceMass = obterMaiorMassaGeral();
+            let mass = referenceMass * (0.01 + Math.random() * 0.02);
+
+            bodies.push(new Body(x, y, vx, vy, mass, 'comet'));
+        }
+
+        function spawnBinarySystem() {
+            let x1, y1, x2, y2, sysX, sysY, distToPlayer;
+            let maxTentativas = 20;
+
+            // Garante que o sistema binário não spawna em cima do jogador
+            do {
+                let angle = Math.random() * Math.PI * 2;
+                let dist = ARENA_RADIUS * 0.2 + Math.random() * (ARENA_RADIUS * 0.5);
+                sysX = Math.cos(angle) * dist;
+                sysY = Math.sin(angle) * dist;
+                distToPlayer = player ? Math.sqrt((sysX - player.x)**2 + (sysY - player.y)**2) : Infinity;
+                maxTentativas--;
+            } while(distToPlayer < SAFE_SPAWN_DISTANCE + 200 && maxTentativas > 0);
+
+            let refMass = obterMaiorMassaGeral();
+            let m1 = refMass * (0.6 + Math.random() * 2.5);
+            let m2 = refMass * (0.6 + Math.random() * 0.5);
+
+            let orbitRadius = 160 + Math.random() * 120;
+            let orbitalVelocity = Math.sqrt((G * (m1 + m2)) / orbitRadius) * 25;
+
+            let sysAngle = Math.random() * Math.PI * 2;
+            x1 = sysX + Math.cos(sysAngle) * (orbitRadius / 2);
+            y1 = sysY + Math.sin(sysAngle) * (orbitRadius / 2);
+            x2 = sysX - Math.cos(sysAngle) * (orbitRadius / 2);
+            y2 = sysY - Math.sin(sysAngle) * (orbitRadius / 2);
+
+            let tangentAngle = sysAngle + Math.PI / 2;
+            let sysVx = (Math.random() - 0.5) * 40;
+            let sysVy = (Math.random() - 0.5) * 40;
+
+            let types = ['star', 'blue_giant', 'white_hole'];
+            let type1 = types[Math.floor(Math.random() * types.length)];
+            let type2 = types[Math.floor(Math.random() * types.length)];
+
+            let body1 = new Body(x1, y1, sysVx + Math.cos(tangentAngle) * (orbitalVelocity * 0.5), sysVy + Math.sin(tangentAngle) * (orbitalVelocity * 0.5), m1, type1);
+            let body2 = new Body(x2, y2, sysVx - Math.cos(tangentAngle) * (orbitalVelocity * 0.5), sysVy - Math.sin(tangentAngle) * (orbitalVelocity * 0.5), m2, type2);
+
+            bodies.push(body1, body2);
+        }
+
+function spawnOrbitalSystems() {
+    // REMOVA O SETTIMEOUT DAQUI
+    let stars = bodies.filter(b => b.type === 'star' || b.type === 'blue_giant' || b.type === 'white_hole' );
+    let refMass = obterMaiorMassaGeral();
+
+    stars.forEach((star, index) => {
+        let pDist = star.radius * 3.5 + Math.random() * 180;
+        let pMass = refMass * (0.12 + Math.random() * 0.15);
+        let planet = new Body(star.x + pDist, star.y, 0, 0, pMass, 'planet');
+        planet.orbitTarget = star;
+        planet.orbitRadius = pDist;
+        planet.orbitSpeed = Math.sqrt((G * star.mass) / pDist) * 0.12;
+        bodies.push(planet);
+
+        let lDist = planet.radius * 2.5 + Math.random() * 30;
+        let lMass = planet.mass * 0.15;
+        let moon = new Body(planet.x + lDist, planet.y, 0, 0, lMass, 'moon');
+        moon.orbitTarget = planet;
+        moon.orbitRadius = lDist;
+        moon.orbitSpeed = Math.sqrt((G * planet.mass) / lDist) * 0.4;
+        bodies.push(moon);
+
+        if (index % 2 === 0) {
+            let sDist = star.radius * 5.8 + Math.random() * 250;
+            let sMass = refMass * (0.18 + Math.random() * 0.15);
+            let saturn = new Body(star.x - sDist, star.y, 0, 0, sMass, 'saturn');
+            saturn.orbitTarget = star;
+            saturn.orbitRadius = sDist;
+            saturn.orbitSpeed = Math.sqrt((G * star.mass) / sDist) * 0.12;
+            bodies.push(saturn);
+        }
+    });
+}
+
+        function spawnDynamicBody(initialCluster = false) {
+            let x, y, distToPlayer;
+            let tentativas = 30;
+
+            // SISTEMA DE DISTÂNCIA SEGURA CONTRA SPAWN INJUSTO
+            do {
+                let angle = Math.random() * Math.PI * 2;
+                let dist = Math.random() * (ARENA_RADIUS - 60);
+                x = Math.cos(angle) * dist;
+                y = Math.sin(angle) * dist;
+                
+                distToPlayer = player ? Math.sqrt((x - player.x)**2 + (y - player.y)**2) : Infinity;
+                tentativas--;
+            } while (distToPlayer < SAFE_SPAWN_DISTANCE && tentativas > 0);
+
+            let rand = Math.random() * 100;
+            let type = 'particle';
+            let referenceMass = obterMaiorMassaGeral();
+            let mass = (0.04 + Math.random() * 0.08) * referenceMass;
+           
+            if (rand < 12) {
+                type = 'star';
+                mass = referenceMass * (0.35 + Math.random() * 0.25);
+            } else if (rand < 22) {
+                type = 'blue_giant';
+                mass = referenceMass * (0.85 + Math.random() * 0.45);
+            } else if (rand < 30) {
+                type = 'white_hole';
+                mass = referenceMass * (0.25 + Math.random() * 0.25);
+            } else if (rand < 38) {
+                type = 'proton_star';
+                mass = referenceMass * (0.40 + Math.random() * 0.30);
+            } else if (rand < 44) {
+                type = 'pulsar';
+                mass = referenceMass * (0.45 + Math.random() * 0.35);
+            } else if (rand < 46) {
+                let activeWormholes = bodies.filter(b => b.type === 'wormhole' && !b.isCollapsing);
+                if (activeWormholes.length === 0) { spawnWormholePair(); return; }
+            } else if (rand < 48) {
+                type = 'nebula';
+                mass = referenceMass * (6.0 + Math.random() * 5.0);
+            }
+           
+            if (mass < 2) mass = 2 + Math.random() * 5;
+            bodies.push(new Body(x, y, (Math.random()-0.5)*30, (Math.random()-0.5)*30, mass, type));
+        }
+
+        function spawnSafeBot(initial = false) {
+            if (!player) return;
+            let spawnX, spawnY, distToPlayer;
+            let tentativas = 30;
+
+            // SISTEMA DE DISTÂNCIA SEGURA CONTRA BOT NASCER EM CIMA DO PLAYER
+            do {
+                let angle = Math.random() * Math.PI * 2;
+                let dist = ARENA_RADIUS * 0.2 + Math.random() * (ARENA_RADIUS - ARENA_RADIUS * 0.35);
+                spawnX = Math.cos(angle) * dist;
+                spawnY = Math.sin(angle) * dist;
+                
+                distToPlayer = Math.sqrt((spawnX - player.x)**2 + (spawnY - player.y)**2);
+                tentativas--;
+            } while(distToPlayer < SAFE_SPAWN_DISTANCE && tentativas > 0);
+
+            let referenceMass = obterMaiorMassaGeral();
+            let m = referenceMass * (0.4 + Math.random() * 1.5);
+            bodies.push(new Body(spawnX, spawnY, (Math.random()-0.5)*30, (Math.random()-0.5)*30, m, 'black_hole'));
+        }
+
+        window.addEventListener('keydown', e => { if (document.activeElement.tagName === 'INPUT') return; keys[e.key.toLowerCase()] = true; });
+        window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+        function setClickTarget(clientX, clientY) {
+            clickTarget.x = (clientX - canvas.width / 2) / camera.zoom + camera.x;
+            clickTarget.y = (clientY - canvas.height / 2) / camera.zoom + camera.y;
+            clickTarget.active = true;
+        }
+
+        window.addEventListener('mousedown', e => { if (e.target.closest('#ui-container') || e.target.closest('#event-alert')) return; setClickTarget(e.clientX, e.clientY); });
+        window.addEventListener('mousemove', e => { if (clickTarget.active) setClickTarget(e.clientX, e.clientY); });
+        window.addEventListener('mouseup', () => clickTarget.active = false);
+        window.addEventListener('touchstart', e => { if (e.target.closest('#ui-container') || e.target.closest('#event-alert')) return; setClickTarget(e.touches[0].clientX, e.touches[0].clientY); });
+        window.addEventListener('touchmove', e => { setClickTarget(e.touches[0].clientX, e.touches[0].clientY); });
+        window.addEventListener('touchend', () => clickTarget.active = false);
+
+        function processPlayerMovement(inNebula = false, dtSeconds) {
+            if (gameOver || !player) return;
+            let moveX = 0;
+            let moveY = 0;
+            let penalty = inNebula ? 0.55 : 1.0;
+           
+            const maxSpeed = (300.0 + (Math.log10(player.mass) * 150.0)) * penalty;
+           
+            if (keys['w'] || keys['arrowup']) moveY = -1;
+            if (keys['s'] || keys['arrowdown']) moveY = 1;
+            if (keys['a'] || keys['arrowleft']) moveX = -1;
+            if (keys['d'] || keys['arrowright']) moveX = 1;
+           
+            if (clickTarget.active && moveX === 0 && moveY === 0) {
+                let dx = clickTarget.x - player.x;
+                let dy = clickTarget.y - player.y;
+                let dist = Math.sqrt(dx*dx + dy*dy);
+                if (dist > 5) {
+                    let intensity = Math.min(1, dist / 250);
+                    moveX = (dx / dist) * intensity;
+                    moveY = (dy / dist) * intensity;
+                }
+            }
+           
+            let lerpFactor = 1 - Math.pow(0.001, dtSeconds);
+            player.vx = player.vx * (1 - lerpFactor) + moveX * maxSpeed * lerpFactor;
+            player.vy = player.vy * (1 - lerpFactor) + moveY * maxSpeed * lerpFactor;
+        }
+
+        function processAI(bot, inNebula = false, dtSeconds) {
+            if (bot.type === 'player' || bot.isBeingAbsorbed) return;
+            let distFromCenter = Math.sqrt(bot.x * bot.x + bot.y * bot.y);
+           
+            if (distFromCenter > ARENA_RADIUS * 0.99) {
+                let moveX = -bot.x; let moveY = -bot.y;
+                let dist = Math.sqrt(moveX * moveX + moveY * moveY);
+                if (dist > 0) {
+                    let penalty = inNebula ? 0.55 : 1.0;
+                    const botSpeed = (260.0 + (Math.log10(bot.mass) * 140.0)) * penalty;
+                    let lerpFactor = 1 - Math.pow(0.01, dtSeconds);
+                    bot.vx = bot.vx * (1 - lerpFactor) + (moveX / dist) * botSpeed * lerpFactor;
+                    bot.vy = bot.vy * (1 - lerpFactor) + (moveY / dist) * botSpeed * lerpFactor;
+                    bot.wanderAngle = Math.atan2(moveY, moveX) + (Math.random() - 0.5);
+                    return;
+                }
+            }
+
+            let closestTarget = null; let closestThreat = null;
+            let minDistTarget = Infinity; let minDistThreat = Infinity;
+            let aiVisionRadius = ARENA_RADIUS * 0.6;
+            if (inNebula) aiVisionRadius *= 0.6;
+
+            for (let other of bodies) {
+                if (other === bot || other.isBeingAbsorbed || other.type === 'nebula' || other.type === 'wormhole') continue;
+                let dx = other.x - bot.x; let dy = other.y - bot.y;
+                let dist = Math.sqrt(dx*dx + dy*dy);
+               
+                if (dist < aiVisionRadius) {
+                    if (other.mass < bot.mass && other.type !== 'white_hole') {
+                        let weight = (other.type === 'particle' || other.type === 'supernova_particle' || other.type === 'comet') ? dist * 1.8 : dist;
+                        if (weight < minDistTarget) { minDistTarget = weight; closestTarget = other; }
+                    } else if (other.mass > bot.mass && (other.type === 'black_hole' || other.type === 'player' || other.type === 'pulsar')) {
+                        if (dist < minDistThreat) { minDistThreat = dist; closestThreat = other; }
+                    }
+                }
+            }
+
+            let moveX = 0, moveY = 0;
+            let usingWormholeTactically = false;
+            let nearbyWormhole = null; let minWormholeDist = Infinity;
+
+            for (let other of bodies) {
+                if (other.type === 'wormhole' && !other.isCollapsing && bot.radius < other.radius) {
+                    let dW = Math.sqrt((other.x - bot.x)**2 + (other.y - bot.y)**2);
+                    if (dW < aiVisionRadius && dW < minWormholeDist) { minWormholeDist = dW; nearbyWormhole = other; }
+                }
+            }
+
+            if (closestThreat && nearbyWormhole && minWormholeDist < closestThreat.radius * 12) {
+                let currentThreatDist = Math.sqrt((closestThreat.x - bot.x)**2 + (closestThreat.y - bot.y)**2);
+                if (nearbyWormhole.targetWormhole) {
+                    let exitX = nearbyWormhole.targetWormhole.x; let exitY = nearbyWormhole.targetWormhole.y;
+                    let distFromThreatAtExit = Math.sqrt((closestThreat.x - exitX)**2 + (closestThreat.y - exitY)**2);
+                    if (distFromThreatAtExit > currentThreatDist) {
+                        moveX = nearbyWormhole.x - bot.x; moveY = nearbyWormhole.y - bot.y;
+                        usingWormholeTactically = true;
+                    }
+                }
+            }
+
+            if (!usingWormholeTactically) {
+                if (closestThreat) { moveX = bot.x - closestThreat.x; moveY = bot.y - closestThreat.y; }
+                else if (closestTarget) { moveX = closestTarget.x - bot.x; moveY = closestTarget.y - bot.y; }
+                else {
+                    if (!bot.wanderAngle) bot.wanderAngle = Math.random() * Math.PI * 2;
+                    bot.wanderAngle += (Math.random() - 0.5) * 8.0 * dtSeconds;
+                    moveX = Math.cos(bot.wanderAngle); moveY = Math.sin(bot.wanderAngle);
+                }
+            }
+
+            if (moveX !== 0 || moveY !== 0) {
+                let dist = Math.sqrt(moveX*moveX + moveY*moveY);
+                let penalty = inNebula ? 0.55 : 1.0;
+                const botSpeed = (260.0 + (Math.log10(bot.mass) * 140.0)) * penalty;
+                let lerpFactor = 1 - Math.pow(0.005, dtSeconds);
+                bot.vx = bot.vx * (1 - lerpFactor) + (moveX / dist) * botSpeed * lerpFactor;
+                bot.vy = bot.vy * (1 - lerpFactor) + (moveY / dist) * botSpeed * lerpFactor;
+            }
+        }
+
+        function drawRadarIndicator(target, color, label = "") {
+            if (!player || !target || target.isBeingAbsorbed || target.type === 'nebula') return;
+            let dx = target.x - player.x;
+            let dy = target.y - player.y;
+            let dist = Math.sqrt(dx*dx + dy*dy);
+            let screenTargetX = canvas.width / 2 + (target.x - camera.x) * camera.zoom;
+            let screenTargetY = canvas.height / 2 + (target.y - camera.y) * camera.zoom;
+            const pad = 40;
+            if (screenTargetX >= pad && screenTargetX <= canvas.width - pad && screenTargetY >= pad && screenTargetY <= canvas.height - pad) return;
+           
+            let angle = Math.atan2(dy, dx);
+            let edgeX = canvas.width / 2 + Math.cos(angle) * (canvas.width / 2 - pad);
+            let edgeY = canvas.height / 2 + Math.sin(angle) * (canvas.height / 2 - pad);
+            edgeX = Math.max(pad, Math.min(canvas.width - pad, edgeX));
+            edgeY = Math.max(pad, Math.min(canvas.height - pad, edgeY));
+           
+            ctx.save();
+            ctx.translate(edgeX, edgeY);
+            ctx.rotate(angle);
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.moveTo(12, 0); ctx.lineTo(-6, -7); ctx.lineTo(-2, 0); ctx.lineTo(-6, 7);
+            ctx.closePath(); ctx.fill();
+            ctx.restore();
+           
+            ctx.save();
+            ctx.fillStyle = color;
+            ctx.font = "bold 10px sans-serif";
+            ctx.textAlign = Math.cos(angle) > 0 ? "right" : "left";
+            ctx.fillText(`${label} (${Math.floor(dist)}m)`, edgeX - Math.cos(angle) * 22, edgeY - Math.sin(angle) * 22 + 3);
+            ctx.restore();
+        }
+
+        function getLensingPosition(body, isSpecificCoords = false, customX = 0, customY = 0) {
+            let renderX = isSpecificCoords ? customX : body.x;
+            let renderY = isSpecificCoords ? customY : body.y;
+            if (!isSpecificCoords && body.isBeingAbsorbed) return { x: renderX, y: renderY };
+
+            for (let massive of bodies) {
+                if (!massive.isMassive || massive.type === 'white_hole' || massive.type === 'star' || massive.type === 'blue_giant' || massive.type === 'nebula' || massive.type === 'wormhole' || massive === body || massive.isBeingAbsorbed) continue;
+                let targetX = isSpecificCoords ? customX : body.x;
+                let targetY = isSpecificCoords ? customY : body.y;
+                let dx = targetX - massive.x; let dy = targetY - massive.y;
+                let dist = Math.sqrt(dx * dx + dy * dy);
+                let lensingRadius = massive.radius * 12.0;
+                if (dist < lensingRadius && dist > massive.radius) {
+                    let factor = (dist - massive.radius) / (lensingRadius - massive.radius);
+                    let strength = (1 - Math.sin(factor * Math.PI * 0.5)) * (massive.radius * 0.6);
+                    renderX += (dx / dist) * strength; renderY += (dy / dist) * strength;
+                }
+            }
+            return { x: renderX, y: renderY };
+        }
+
+        function triggerSupernova(star) {
+            if (star.isBeingAbsorbed) return;
+            star.isCollapsing = true;
+            let blastRadius = star.radius * 15;
+            let forceIntensity = star.mass * 50.0;
+
+            shockwaves.push(new Shockwave(star.x, star.y, blastRadius, forceIntensity));
+
+            let particleCount = 30 + Math.floor(Math.random() * 15);
+            for (let p = 0; p < particleCount; p++) {
+                let pAngle = Math.random() * Math.PI * 2;
+                let pSpeed = 200 + Math.random() * 400;
+                let pMass = (star.mass * 0.02);
+               
+                let particle = new Body(
+                    star.x + Math.cos(pAngle) * (star.radius * 0.5), star.y + Math.sin(pAngle) * (star.radius * 0.5),
+                    star.vx + Math.cos(pAngle) * pSpeed, star.vy + Math.sin(pAngle) * pSpeed,
+                    pMass, 'supernova_particle'
+                );
+                bodies.push(particle);
+            }
+        }
+
+        function applyElasticCollision(b1, b2, dx, dy, dist) {
+            let overlap = (b1.radius + b2.radius) - dist;
+            let nx = dx / dist; let ny = dy / dist;
+            b1.x -= nx * overlap * 0.5; b1.y -= ny * overlap * 0.5;
+            b2.x += nx * overlap * 0.5; b2.y += ny * overlap * 0.5;
+            let kx = b1.vx - b2.vx; let ky = b1.vy - b2.vy;
+            let p = 2 * (nx * kx + ny * ky) / (b1.mass + b2.mass);
+            b1.vx -= p * b2.mass * nx; b1.vy -= p * b2.mass * ny;
+            b2.vx += p * b1.mass * nx; b2.vy += p * b1.mass * ny;
+           
+            b1.distortionX = 2.2; b1.distortionAngle = Math.atan2(ny, nx);
+            b2.distortionX = 2.2; b2.distortionAngle = Math.atan2(-ny, -nx);
+        }
+
+        function checkNebulaInside(body) {
+            if (!body) return false;
+            for (let b of bodies) {
+                if (b.type === 'nebula') {
+                    let d = Math.sqrt((body.x - b.x)**2 + (body.y - b.y)**2);
+                    if (d < b.nebulaMaxRadius) return true;
+                }
+            }
+            return false;
+        }
+
+        function updateSolarWind(dtSeconds) {
+            if (!solarWind.active) {
+                solarWind.timerNextEvent -= dtSeconds;
+                if (solarWind.alertTimer > 0) {
+                    solarWind.alertTimer -= dtSeconds;
+                    if (solarWind.alertTimer <= 0) document.getElementById('event-alert').style.opacity = '0';
+                }
+
+                if (solarWind.timerNextEvent <= 0) {
+                    solarWind.active = true;
+                    solarWind.alertTimer = solarWind.alertDuration;
+                    document.getElementById('event-alert').style.opacity = '1';
+                   
+                    const dirs = ['LEFT_TO_RIGHT', 'RIGHT_TO_LEFT', 'TOP_TO_BOTTOM', 'BOTTOM_TO_TOP'];
+                    solarWind.direction = dirs[Math.floor(Math.random() * dirs.length)];
+                    solarWind.pos = (solarWind.direction === 'LEFT_TO_RIGHT' || solarWind.direction === 'TOP_TO_BOTTOM') ? -ARENA_RADIUS : ARENA_RADIUS;
+                }
+            } else {
+                if (solarWind.alertTimer > 0) {
+                    solarWind.alertTimer -= dtSeconds;
+                    if (solarWind.alertTimer <= 0) document.getElementById('event-alert').style.opacity = '0';
+                }
+
+                if (solarWind.direction === 'LEFT_TO_RIGHT' || solarWind.direction === 'TOP_TO_BOTTOM') {
+                    solarWind.pos += solarWind.speed * dtSeconds;
+                    if (solarWind.pos > ARENA_RADIUS) { solarWind.active = false; solarWind.timerNextEvent = 25.0 + Math.random() * 15.0; }
+                } else {
+                    solarWind.pos -= solarWind.speed * dtSeconds;
+                    if (solarWind.pos < -ARENA_RADIUS) { solarWind.active = false; solarWind.timerNextEvent = 25.0 + Math.random() * 15.0; }
+                }
+
+                for (let b of bodies) {
+                    if (b.type === 'nebula' || b.isBeingAbsorbed) continue;
+                    let hit = false; let pushX = 0; let pushY = 0;
+
+                    if (solarWind.direction === 'LEFT_TO_RIGHT' && b.x > solarWind.pos - 400 && b.x < solarWind.pos + 100) { hit = true; pushX = 1; }
+                    else if (solarWind.direction === 'RIGHT_TO_LEFT' && b.x < solarWind.pos + 400 && b.x > solarWind.pos - 100) { hit = true; pushX = -1; }
+                    else if (solarWind.direction === 'TOP_TO_BOTTOM' && b.y > solarWind.pos - 400 && b.y < solarWind.pos + 100) { hit = true; pushY = 1; }
+                    else if (solarWind.direction === 'BOTTOM_TO_TOP' && b.y < solarWind.pos + 400 && b.y > solarWind.pos - 100) { hit = true; pushY = -1; }
+
+                    if (hit) {
+                        let massFactor = Math.sqrt(b.mass);
+                        if (massFactor < 0.5) massFactor = 0.5;
+                        let appliedForce = (solarWind.force / massFactor) * dtSeconds * 30.0;
+                        b.vx += pushX * appliedForce; b.vy += pushY * appliedForce;
+                        if (Math.random() < 0.1) { b.distortionX = 1.8; b.distortionAngle = Math.atan2(pushY, pushX); }
+                    }
+                }
+            }
+        }
+
+        function drawSolarWindLine() {
+            if (!solarWind.active) return;
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+           
+            let rW = 255; let gW = 100 + Math.floor(Math.sin(rgbTime * 5) * 50); let bW = 0;
+            ctx.shadowBlur = 40; ctx.shadowColor = `rgba(${rW}, ${gW}, ${bW}, 0.8)`;
+            ctx.lineWidth = 60;
+            let grad;
+
+            if (solarWind.direction === 'LEFT_TO_RIGHT' || solarWind.direction === 'RIGHT_TO_LEFT') {
+                grad = ctx.createLinearGradient(solarWind.pos - 150, 0, solarWind.pos + 150, 0);
+                grad.addColorStop(0, 'rgba(255, 60, 0, 0)'); grad.addColorStop(0.5, `rgba(${rW}, ${gW}, ${bW}, 0.65)`); grad.addColorStop(1, 'rgba(255, 200, 0, 0)');
+                ctx.strokeStyle = grad; ctx.beginPath(); ctx.moveTo(solarWind.pos, -ARENA_RADIUS); ctx.lineTo(solarWind.pos, ARENA_RADIUS); ctx.stroke();
+            } else {
+                grad = ctx.createLinearGradient(0, solarWind.pos - 150, 0, solarWind.pos + 150);
+                grad.addColorStop(0, 'rgba(255, 60, 0, 0)'); grad.addColorStop(0.5, `rgba(${rW}, ${gW}, ${bW}, 0.65)`); grad.addColorStop(1, 'rgba(255, 200, 0, 0)');
+                ctx.strokeStyle = grad; ctx.beginPath(); ctx.moveTo(-ARENA_RADIUS, solarWind.pos); ctx.lineTo(-ARENA_RADIUS, solarWind.pos); ctx.stroke();
+            }
+            ctx.restore();
+        }
+
+        function drawUniverseBounds(dtSeconds) {
+            rgbTime += dtSeconds * 1.2;
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+           
+            let rings = [
+                { r: ARENA_RADIUS, speed: rgbTime, width: 7, shadow: 35 },
+                { r: ARENA_RADIUS + 8, speed: -rgbTime * 1.4, width: 4, shadow: 20 },
+                { r: ARENA_RADIUS - 8, speed: rgbTime * 0.7, width: 3, shadow: 15 }
+            ];
+
+            rings.forEach(ring => {
+                ctx.save(); ctx.shadowBlur = ring.shadow;
+                let r = Math.floor(Math.sin(ring.speed) * 127 + 128);
+                let g = Math.floor(Math.sin(ring.speed + 2) * 127 + 128);
+                let b = Math.floor(Math.sin(ring.speed + 4) * 127 + 128);
+                ctx.shadowColor = `rgba(${r}, ${g}, ${b}, 0.9)`; ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.8)`; ctx.lineWidth = ring.width;
+                ctx.beginPath(); ctx.arc(0, 0, ring.r, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+            });
+            ctx.restore();
+        }
+
+        let lastTime = performance.now();
+
+        function update() {
+            let currentTime = performance.now();
+            let dt = currentTime - lastTime;
+            lastTime = currentTime;
+
+            if (dt > 100) dt = 16.66;
+            let dtSeconds = dt / 1000;
+            let pInNebula = checkNebulaInside(player);
+
+            recalcularTodosOsRaios();
+            updateSolarWind(dtSeconds);
+
+            if (!gameOver && player) {
+                processPlayerMovement(pInNebula, dtSeconds);
+                document.getElementById('player-mass-hud').innerText = Math.floor(player.mass);
+                let targetZoom = 10 / player.radius;
+                if (targetZoom > 2.5) targetZoom = 2.5;
+                camera.zoom += (targetZoom - camera.zoom) * 5.0 * dtSeconds;
+            }
+           
+            if (bodies.length < (player && player.mass > 5000 ? 50 : 80)) spawnDynamicBody(false);
+            if (bodies.filter(b => b.type === 'black_hole' && !b.isBeingAbsorbed).length < 3) spawnSafeBot(false);
+            if (bodies.filter(b => b.type === 'comet' && !b.isBeingAbsorbed).length < 10) spawnComet();
+           
+            let toRemove = new Set(); let newParticles = [];
+            let nearParticle = null, nearStar = null, nearBot = null, nearWhite = null, nearPulsar = null, nearWormhole = null, nearProton = null, nearComet = null;
+            let nearPlanet = null, nearMoon = null, nearSaturn = null;
+            let dPart = Infinity, dStar = Infinity, dBot = Infinity, dWhite = Infinity, dPulsar = Infinity, dWormhole = Infinity, dProton = Infinity, dComet = Infinity;
+            let dPlanet = Infinity, dMoon = Infinity, dSaturn = Infinity;
+
+            shockwaves = shockwaves.filter(wave => {
+                let alive = wave.update(dt);
+                if (alive) {
+                    for (let b of bodies) {
+                        if (b.type === 'wormhole' || b.type === 'nebula' || b.isBeingAbsorbed) continue;
+                        let dx = b.x - wave.x; let dy = b.y - wave.y;
+                        let dist = Math.sqrt(dx*dx + dy*dy);
+                        if (Math.abs(dist - wave.currentRadius) < 45) {
+                            let force = ((wave.force / (b.mass || 1)) * (1 - wave.elapsed / wave.duration) * 45.0) * dtSeconds;
+                            b.vx += (dx / (dist || 1)) * force; b.vy += (dy / (dist || 1)) * force;
+                            b.distortionX = 3.2; b.distortionAngle = Math.atan2(dy, dx);
+                        }
+                    }
+                }
+                return alive;
+            });
+
+            let ultimoDoRankBH = obterUltimoDoRankBH();
+
+            for (let i = 0; i < bodies.length; i++) {
+                let b = bodies[i];
+
+                if (b.type === 'particle' && b.mass > b.initialMass) {
+                    b.mass = b.initialMass;
+                }
+
+                if (b.orbitTarget && !b.isBeingAbsorbed) {
+                    if (!bodies.includes(b.orbitTarget) || b.orbitTarget.isBeingAbsorbed) {
+                        b.orbitTarget = null;
+                    } else {
+                        b.orbitAngle += b.orbitSpeed * dtSeconds;
+                        let targetX = b.orbitTarget.x + Math.cos(b.orbitAngle) * b.orbitRadius;
+                        let targetY = b.orbitTarget.y + Math.sin(b.orbitAngle) * b.orbitRadius;
+                       
+                        b.vx = (targetX - b.x) / dtSeconds; b.vy = (targetY - b.y) / dtSeconds;
+                        b.x = targetX; b.y = targetY;
+                    }
+                }
+
+                let distFromCenter = Math.sqrt(b.x * b.x + b.y * b.y);
+                if (distFromCenter + b.radius > ARENA_RADIUS) {
+                    let nx = b.x / distFromCenter; let ny = b.y / distFromCenter;
+                    b.x = nx * (ARENA_RADIUS - b.radius); b.y = ny * (ARENA_RADIUS - b.radius);
+                    let dotProduct = b.vx * nx + b.vy * ny;
+                    b.vx = (b.vx - 2 * dotProduct * nx) * (b.type === 'comet' ? 1 : 0.85);
+                    b.vy = (b.vy - 2 * dotProduct * ny) * (b.type === 'comet' ? 1 : 0.85);
+                    b.distortionX = 2.0; b.distortionAngle = Math.atan2(ny, nx);
+                    if(b.type === 'black_hole') b.wanderAngle = Math.atan2(-ny, -nx) + (Math.random() - 0.5) * 2;
+                }
+
+                if (b.wormholeCooldown > 0) b.wormholeCooldown -= dtSeconds;
+                b.diskRotation += 2.5 * dtSeconds;
+
+                if (b.isBeingAbsorbed) {
+                    let target = b.absorberTarget;
+                    if (!bodies.includes(target) || target.isBeingAbsorbed) { toRemove.add(i); continue; }
+                    let tdx = target.x - b.x; let tdy = target.y - b.y; let tdist = Math.sqrt(tdx*tdx + tdy*tdy);
+                   
+                    if (tdist < target.radius * 0.35 || b.alpha <= 0.05 || tdist < 5) {
+                        if (b.type === 'particle') {
+                            target.mass += 1.2;
+                        } else {
+                            target.mass += (b.type === 'supernova_particle' || b.type === 'comet') ? b.mass : b.mass * 0.75;
+                        }
+
+                        if ((target.type === 'star' || target.type === 'blue_giant') && !target.isCollapsing && target.mass >= target.initialMass * 2) {
+                            target.isCollapsing = true; target.collapseTimer = 2.0; target.assignColor();
+                        }
+                        if (b.type === 'player') { gameOver = true; document.getElementById('game-over-screen').style.display = 'flex'; }
+                        toRemove.add(i); continue;
+                    }
+                    let currentAngle = Math.atan2(b.y - target.y, b.x - target.x);
+                    b.absorptionAngleOffset += (4.0 + (target.radius / (tdist + 10)) * 10.0) * dtSeconds;
+                    let nextAngle = currentAngle + (4.0 + (target.radius / (tdist + 10)) * 10.0) * dtSeconds;
+                    let nextDist = Math.max(0, tdist - (100.0 + (tdist * 2.5) + (target.radius * 3.5)) * dtSeconds);
+                   
+                    b.x = target.x + Math.cos(nextAngle) * nextDist; b.y = target.y + Math.sin(nextAngle) * nextDist;
+                    b.alpha -= 1.0 * dtSeconds; b.radius = Math.max(1, b.initialAbsorbedRadius * (tdist / (target.radius * 4)));
+                    b.distortionAngle = nextAngle + Math.PI / 2; continue;
+                }
+
+                if ((b.type === 'star' || b.type === 'blue_giant') && b.isCollapsing) {
+                    b.collapseTimer -= dtSeconds;
+                    if (b.collapseTimer <= 0) { triggerSupernova(b); toRemove.add(i); continue; }
+                }
+
+                if (b.type === 'particle' || b.type === 'supernova_particle') {
+                    b.lifespan -= dtSeconds; if (b.lifespan <= 0) { toRemove.add(i); continue; }
+                    let fadeThreshold = b.type === 'supernova_particle' ? b.maxLifespan : 2.5;
+                    if (b.lifespan < fadeThreshold) { b.alpha = b.lifespan / fadeThreshold; b.color = `rgba(${b.colorRGB}, ${b.alpha})`; }
+                }
+
+                if (b.type === 'pulsar') b.beamAngle += b.beamSpeed * dtSeconds;
+                if (b.type === 'wormhole' && ultimoDoRankBH && ultimoDoRankBH.radius > b.radius) b.isCollapsing = true;
+                if (b.type === 'wormhole' && b.isCollapsing) { b.alpha -= 1.2 * dtSeconds; if (b.alpha <= 0) { toRemove.add(i); continue; } }
+
+                if (player && b !== player) {
+                    let d = Math.sqrt((b.x - player.x)**2 + (b.y - player.y)**2);
+                    if ((b.type === 'particle' || b.type === 'supernova_particle') && d < dPart) { dPart = d; nearParticle = b; }
+                    if (b.type === 'comet' && d < dComet) { dComet = d; nearComet = b; }
+                    if ((b.type === 'star' || b.type === 'blue_giant') && d < dStar) { dStar = d; nearStar = b; }
+                    if (b.type === 'white_hole' && d < dWhite) { dWhite = d; nearWhite = b; }
+                    if (b.type === 'proton_star' && d < dProton) { dProton = d; nearProton = b; }
+                    if (b.type === 'black_hole' && d < dBot) { dBot = d; nearBot = b; }
+                    if (b.type === 'pulsar' && d < dPulsar) { dPulsar = d; nearPulsar = b; }
+                    if (b.type === 'wormhole' && !b.isCollapsing && d < dWormhole) { dWormhole = d; nearWormhole = b; }
+                    if (b.type === 'planet' && d < dPlanet) { dPlanet = d; nearPlanet = b; }
+                    if (b.type === 'moon' && d < dMoon) { dMoon = d; nearMoon = b; }
+                    if (b.type === 'saturn' && d < dSaturn) { dSaturn = d; nearSaturn = b; }
+                }
+
+                let decayFactor = 1 - Math.pow(0.001, dtSeconds);
+                b.distortionX += (1 - b.distortionX) * decayFactor; b.distortionY += (1 - b.distortionY) * decayFactor;
+               
+                if (b.type === 'black_hole') processAI(b, checkNebulaInside(b), dtSeconds);
+                if (b.type === 'star' || b.type === 'blue_giant' || b.type === 'proton_star' || b.type === 'comet' || b.type === 'planet' || b.type === 'saturn') {
+                    b.trail.push({x: b.x, y: b.y}); if (b.trail.length > (b.type === 'comet' ? 12 : 6)) b.trail.shift();
+                }
+            }
+           
+            if (player) {
+                camera.x += (player.x - camera.x) * (1 - Math.pow(0.01, dtSeconds));
+                camera.y += (player.y - camera.y) * (1 - Math.pow(0.01, dtSeconds));
+            }
+           
+            for (let i = 0; i < bodies.length; i++) {
+                let b1 = bodies[i]; if (toRemove.has(i) || b1.isBeingAbsorbed || b1.type === 'nebula') continue;
+
+                if (b1.type === 'white_hole') {
+                    b1.mass -= (obterMaiorMassaGeral() * 0.01) * dtSeconds;
+                    if (b1.mass < 6) { toRemove.add(i); continue; }
+                    if (Math.random() < 5.0 * dtSeconds) {
+                        const spawnAngle = Math.random() * Math.PI * 2; const outV = 100.0 + Math.log10(b1.mass) * 60.0;
+                        newParticles.push(new Body(b1.x + Math.cos(spawnAngle)*(b1.radius+3), b1.y + Math.sin(spawnAngle)*(b1.radius+3), b1.vx + Math.cos(spawnAngle)*outV, b1.vy + Math.sin(spawnAngle)*outV, Math.max(1.5, b1.mass*0.02), 'particle'));
+                    }
+                }
+
+                for (let j = i + 1; j < bodies.length; j++) {
+                    let b2 = bodies[j]; if (toRemove.has(j) || b2.isBeingAbsorbed || b2.type === 'nebula') continue;
+                    const dx = b2.x - b1.x; const dy = b2.y - b1.y; const distSq = dx * dx + dy * dy; const dist = Math.sqrt(distSq);
+                   
+                    if (b1.type === 'wormhole' && !b1.isCollapsing && b2.type === 'wormhole' && !b2.isCollapsing) {
+                        if (dist < (b1.radius + b2.radius)) {
+                            if ((!b1.wormholeCooldown || b1.wormholeCooldown <= 0) && (!b2.wormholeCooldown || b2.wormholeCooldown <= 0)) {
+                                let maiorW = b1.radius >= b2.radius ? b1 : b2; let menorW = b1.radius < b2.radius ? b1 : b2;
+                                if (maiorW.targetWormhole && maiorW.wormholePairId === maiorW.targetWormhole.wormholePairId && bodies.includes(maiorW.targetWormhole)) {
+                                    let saidaWormhole = maiorW.targetWormhole; let exitAngle = Math.random() * Math.PI * 2;
+                                    menorW.x = saidaWormhole.x + Math.cos(exitAngle) * (saidaWormhole.radius + menorW.radius + 40);
+                                    menorW.y = saidaWormhole.y + Math.sin(exitAngle) * (saidaWormhole.radius + menorW.radius + 40);
+                                    menorW.vx = Math.cos(exitAngle) * 350.0; menorW.vy = Math.sin(exitAngle) * 350.0;
+                                    menorW.wormholeCooldown = 4.0; maiorW.wormholeCooldown = 4.0; saidaWormhole.wormholeCooldown = 4.0;
+                                    menorW.distortionX = 3.0; menorW.distortionAngle = exitAngle; continue;
+                                }
+                            }
+                        }
+                    }
+
+                    if ((b1.type === 'wormhole' && !b1.isCollapsing) || (b2.type === 'wormhole' && !b2.isCollapsing)) {
+                        let wormholeNode = b1.type === 'wormhole' ? b1 : b2; let travelerNode = b1.type === 'wormhole' ? b2 : b1;
+                        if (dist < wormholeNode.radius && travelerNode.type !== 'wormhole') {
+                            if (!travelerNode.isBeingAbsorbed && travelerNode.type !== 'nebula' && travelerNode.radius < wormholeNode.radius && (!travelerNode.wormholeCooldown || travelerNode.wormholeCooldown <= 0)) {
+                                if (wormholeNode.targetWormhole && wormholeNode.wormholePairId === wormholeNode.targetWormhole.wormholePairId && bodies.includes(wormholeNode.targetWormhole)) {
+                                    let exitAngle = Math.atan2(travelerNode.y - wormholeNode.y, travelerNode.x - wormholeNode.x) + Math.PI;
+                                    travelerNode.x = wormholeNode.targetWormhole.x + Math.cos(exitAngle) * (wormholeNode.targetWormhole.radius + travelerNode.radius + 8);
+                                    travelerNode.y = wormholeNode.targetWormhole.y + Math.sin(exitAngle) * (wormholeNode.targetWormhole.radius + travelerNode.radius + 8);
+                                    let impulseSpeed = 180.0 + (Math.sqrt(travelerNode.vx*travelerNode.vx + travelerNode.vy*travelerNode.vy));
+                                    travelerNode.vx = Math.cos(exitAngle) * impulseSpeed; travelerNode.vy = Math.sin(exitAngle) * impulseSpeed;
+                                    travelerNode.wormholeCooldown = 3.0; travelerNode.distortionX = 2.5; travelerNode.distortionAngle = exitAngle;
+                                    if (travelerNode === player) { camera.x = player.x; camera.y = player.y; } continue;
+                                }
+                            }
+                        }
+                    }
+
+                    if ((b1.type === 'black_hole' || b1.type === 'player') || (b2.type === 'black_hole' || b2.type === 'player')) {
+                        let bh = (b1.type === 'black_hole' || b1.type === 'player') ? b1 : b2; let target = (b1.type === 'black_hole' || b1.type === 'player') ? b2 : b1;
+                        if (bh.mass > 150 && target.type !== 'nebula' && target.type !== 'wormhole' && !target.isBeingAbsorbed) {
+                            if (dist < bh.radius * 3.2 && dist > bh.radius) {
+                                let orbitAngle = Math.atan2(target.y - bh.y, target.x - bh.x);
+                                target.vx += Math.cos(orbitAngle + Math.PI / 2) * ((350.0 / (dist / bh.radius)) * dtSeconds);
+                                target.vy += Math.sin(orbitAngle + Math.PI / 2) * ((350.0 / (dist / bh.radius)) * dtSeconds);
+                                target.distortionX = 1.3; target.distortionAngle = orbitAngle;
+                            }
+                        }
+                    }
+
+                    if (b1.type === 'pulsar' || b2.type === 'pulsar') {
+                        let pulsarNode = b1.type === 'pulsar' ? b1 : b2; let targetNode = b1.type === 'pulsar' ? b2 : b1;
+                        if (targetNode.type === 'wormhole') continue;
+                        if (dist < pulsarNode.radius * 12.0 && !targetNode.isBeingAbsorbed) {
+                            let angleToTarget = Math.atan2(targetNode.y - pulsarNode.y, targetNode.x - pulsarNode.x);
+                            let normalizedAngleToTarget = (angleToTarget + Math.PI * 2) % (Math.PI * 2);
+                            let normalizedBeamAngle = (pulsarNode.beamAngle + Math.PI * 2) % (Math.PI * 2);
+                            let relativeAngle1 = Math.abs(normalizedAngleToTarget - normalizedBeamAngle);
+                            let relativeAngle2 = Math.abs(normalizedAngleToTarget - ((normalizedBeamAngle + Math.PI) % (Math.PI * 2)));
+
+                            if (relativeAngle1 < 0.18 || relativeAngle1 > Math.PI * 2 - 0.18 || relativeAngle2 < 0.18 || relativeAngle2 > Math.PI * 2 - 0.18) {
+                                if (targetNode.type === 'particle' || targetNode.type === 'supernova_particle' || targetNode.type === 'comet') { toRemove.add(b1.type === 'pulsar' ? j : i); continue; }
+                                else {
+                                    targetNode.vx += (Math.cos(angleToTarget) * (600.0 + (Math.log10(pulsarNode.mass) * 400)) * dtSeconds);
+                                    targetNode.vy += (Math.sin(angleToTarget) * (600.0 + (Math.log10(pulsarNode.mass) * 400)) * dtSeconds);
+                                    targetNode.distortionX = 2.0; targetNode.distortionAngle = angleToTarget;
+                                }
+                            }
+                        }
+                    }
+
+                    if (dist < (b1.radius + b2.radius)) {
+                        if (b1.type === 'wormhole' || b2.type === 'wormhole') continue;
+                        if ((b1.type === 'star' || b1.type === 'blue_giant') && (b2.type === 'star' || b2.type === 'blue_giant')) {
+                            triggerSupernova(b1); triggerSupernova(b2); toRemove.add(i); toRemove.add(j); continue;
+                        }
+                        if (b1.type === 'proton_star' || b2.type === 'proton_star') {
+                            let proton = b1.type === 'proton_star' ? b1 : b2; let outro = b1.type === 'proton_star' ? b2 : b1;
+                            if (outro.mass < proton.mass * 3.0 || outro.type === 'white_hole') { applyElasticCollision(b1, b2, dx, dy, dist); continue; }
+                        }
+                        if ((b1.type === 'white_hole' && b2.type === 'white_hole') || ((b1.type === 'star' && b2.type === 'white_hole' || (b1.type === 'white_hole' && b2.type === 'star')))) {
+                            applyElasticCollision(b1, b2, dx, dy, dist); continue;
+                        }
+                        if (b1.type === 'pulsar' && b2.type === 'pulsar') { applyElasticCollision(b1, b2, dx, dy, dist); continue; }
+                       
+                        let maior = b1.mass >= b2.mass ? b1 : b2; let menor = b1.mass < b2.mass ? b1 : b2;
+                        if (maior.type === 'white_hole') continue;
+
+                        // PROTEÇÃO SUPREMA ANTI-PARTÍCULA: Partículas comuns nunca podem comer o Player!
+                        if (menor.type === 'player' && (maior.type === 'particle' || maior.type === 'supernova_particle')) {
+                            // Inverte os papéis: o jogador força a absorção da partícula pesada
+                            maior.isBeingAbsorbed = true;
+                            maior.absorberTarget = menor;
+                            maior.initialAbsorbedRadius = maior.radius;
+                            maior.vx = 0; maior.vy = 0;
+                            continue;
+                        }
+
+                        menor.isBeingAbsorbed = true; menor.absorberTarget = maior; menor.initialAbsorbedRadius = menor.radius;
+                        menor.vx = 0; menor.vy = 0; continue;
+                    }
+
+                    if (b1.type === 'wormhole' || b2.type === 'wormhole' || b1.orbitTarget === b2 || b2.orbitTarget === b1) continue;
+
+                    let forceMag = ((G * b1.mass * b2.mass) / (distSq + SOFTENING)) * 60.0;
+                    if (b1.type === 'player' || b1.type === 'black_hole' || b1.type === 'pulsar') forceMag *= 2.5;
+                    if (b2.type === 'player' || b2.type === 'black_hole' || b2.type === 'pulsar') forceMag *= 2.5;
+
+                    if (!(b1.type === 'player' || b1.type === 'black_hole' || b1.type === 'pulsar')) { b1.vx += ((dx / dist) * forceMag / b1.mass) * dtSeconds; b1.vy += ((dy / dist) * forceMag / b1.mass) * dtSeconds; }
+                    if (!(b2.type === 'player' || b2.type === 'black_hole' || b2.type === 'pulsar')) { b2.vx -= ((dx / dist) * forceMag / b2.mass) * dtSeconds; b2.vy -= ((dy / dist) * forceMag / b2.mass) * dtSeconds; }
+                }
+                if (!b1.orbitTarget) { b1.x += b1.vx * dtSeconds; b1.y += b1.vy * dtSeconds; }
+            }
+            bodies = bodies.filter((_, idx) => !toRemove.has(idx)).concat(newParticles);
+           
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+           
+            ctx.save();
+            ctx.translate(canvas.width / 2, canvas.height / 2); ctx.scale(camera.zoom, camera.zoom); ctx.translate(-camera.x, -camera.y);
+           
+            let halfW = (canvas.width / 2) / camera.zoom; let halfH = (canvas.height / 2) / camera.zoom;
+            let viewLeft = camera.x - halfW; let viewRight = camera.x + halfW; let viewTop = camera.y - halfH; let viewBottom = camera.y + halfH;
+           
+            for (let b of bodies) {
+                if (b.type === 'nebula') {
+                    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+                    for (let nucleus of b.nebulaNuclei) {
+                        ctx.save();
+                        let visualNucleus = getLensingPosition(b, true, b.x + nucleus.relX, b.y + nucleus.relY);
+                        let grad = ctx.createRadialGradient(visualNucleus.x, visualNucleus.y, Math.max(1, nucleus.radius * 0.1), visualNucleus.x, visualNucleus.y, Math.max(2, nucleus.radius));
+                        grad.addColorStop(0, `rgba(${b.colorRGB}, ${nucleus.alphaMult * 2.0})`); grad.addColorStop(0.6, 'rgba(90, 25, 230, 0.04)'); grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+                        ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(visualNucleus.x, visualNucleus.y, Math.max(1, nucleus.radius), 0, Math.PI * 2); ctx.fill(); ctx.restore();
+                    }
+                    ctx.restore();
+                }
+            }
+
+            drawUniverseBounds(dtSeconds); drawSolarWindLine();
+            for (let wave of shockwaves) wave.draw();
+
+            for (let b of bodies) {
+                if ((b.type === 'black_hole' || b.type === 'player') && b.mass > 150 && !b.isBeingAbsorbed) {
+                    if (b.x < viewLeft - b.radius * 4 || b.x > viewRight + b.radius * 4 || b.y < viewTop - b.radius * 4 || b.y > viewBottom + b.radius * 4) continue;
+                    let visualPos = getLensingPosition(b);
+                    ctx.save(); ctx.translate(visualPos.x, visualPos.y); ctx.rotate(b.diskRotation); ctx.globalCompositeOperation = 'lighter';
+                    let diskR = b.radius * 3.2; let diskGrad = ctx.createRadialGradient(0, 0, b.radius * 0.9, 0, 0, diskR);
+                    let rNeon = Math.floor(Math.sin(rgbTime * 1.5) * 100 + 155); let gNeon = Math.floor(Math.sin(rgbTime * 1.5 + 2) * 100 + 155); let bNeon = Math.floor(Math.sin(rgbTime * 1.5 + 4) * 100 + 155);
+                    diskGrad.addColorStop(0.0, 'rgba(0, 0, 0, 0)'); diskGrad.addColorStop(0.2, `rgba(${rNeon}, ${gNeon}, ${bNeon}, 0.85)`); diskGrad.addColorStop(0.5, 'rgba(255, 60, 0, 0.4)'); diskGrad.addColorStop(1.0, 'rgba(0, 0, 0, 0)');
+                    ctx.fillStyle = diskGrad; ctx.shadowBlur = 25; ctx.shadowColor = `rgba(${rNeon}, ${gNeon}, ${bNeon}, 0.6)`;
+                    ctx.scale(1.0, 0.45); ctx.beginPath(); ctx.arc(0, 0, diskR, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+                }
+            }
+
+            for (let b of bodies) {
+                if (b.type === 'pulsar') {
+                    ctx.save(); let pulsedLensing = getLensingPosition(b); ctx.translate(pulsedLensing.x, pulsedLensing.y); ctx.rotate(b.beamAngle);
+                    let beamGrad = ctx.createLinearGradient(0, 0, b.radius * 12.0, 0);
+                    beamGrad.addColorStop(0, 'rgba(255, 255, 255, 0.7)'); beamGrad.addColorStop(0.3, 'rgba(120, 60, 255, 0.3)'); beamGrad.addColorStop(1, 'rgba(0, 230, 255, 0)');
+                    ctx.fillStyle = beamGrad; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(b.radius * 12.0, -b.radius * 0.8); ctx.lineTo(b.radius * 12.0, b.radius * 0.8); ctx.closePath(); ctx.fill();
+                    ctx.save(); ctx.rotate(Math.PI); ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(b.radius * 12.0, -b.radius * 0.8); ctx.lineTo(b.radius * 12.0, b.radius * 0.8); ctx.closePath(); ctx.fill(); ctx.restore(); ctx.restore();
+                }
+
+                if ((b.type === 'star' || b.type === 'blue_giant' || b.type === 'proton_star' || b.type === 'comet' || b.type === 'planet' || b.type === 'saturn') && b.trail.length > 1) {
+                    if (b.x < viewLeft - 100 || b.x > viewRight + 100 || b.y < viewTop - 100 || b.y > viewBottom + 100) continue;
+                    ctx.save(); ctx.beginPath(); let firstPos = getLensingPosition(b.trail[0]); ctx.moveTo(firstPos.x, firstPos.y);
+                    for (let p = 1; p < b.trail.length; p++) { let pos = getLensingPosition(b.trail[p]); ctx.lineTo(pos.x, pos.y); }
+                    if (b.type === 'proton_star') { ctx.strokeStyle = `rgba(0, 240, 255, ${b.alpha * 0.4})`; ctx.lineWidth = 3; }
+                    else if (b.type === 'comet') { ctx.strokeStyle = `rgba(180, 220, 255, ${b.alpha * 0.45})`; ctx.lineWidth = 1.5; }
+                    else if (b.type === 'blue_giant') { ctx.strokeStyle = b.isCollapsing ? `rgba(255, 51, 51, ${b.alpha * 0.4})` : `rgba(0, 160, 255, ${b.alpha * 0.4})`; ctx.lineWidth = 3; }
+                    else if (b.type === 'planet') { ctx.strokeStyle = `rgba(0, 255, 150, 0.35)`; ctx.lineWidth = 2; }
+                    else if (b.type === 'saturn') { ctx.strokeStyle = `rgba(235, 160, 80, 0.35)`; ctx.lineWidth = 2.5; }
+                    else { ctx.strokeStyle = b.isCollapsing ? `rgba(255, 51, 51, ${b.alpha * 0.4})` : `rgba(255, 204, 0, ${b.alpha * 0.25})`; ctx.lineWidth = 2; }
+                    ctx.stroke(); ctx.restore();
+                }
+            }
+
+            for (let b of bodies) {
+                if (b.type === 'nebula') continue;
+                let bound = b.radius * 4; if (b.x < viewLeft - bound || b.x > viewRight + bound || b.y < viewTop - bound || b.y > viewBottom + bound) continue;
+
+                let visualPos = getLensingPosition(b);
+                ctx.save(); ctx.translate(visualPos.x, visualPos.y);
+               
+                if (b.isBeingAbsorbed && b.absorberTarget) {
+                    ctx.rotate(b.distortionAngle); ctx.scale(1.5 + (b.absorberTarget.radius / (b.radius + 1)), Math.max(0.2, 1 / (1.5 + (b.absorberTarget.radius / (b.radius + 1)))));
+                } else if (b.isMassive && b.type !== 'wormhole') {
+                    ctx.rotate(b.distortionAngle); ctx.scale(b.distortionX, b.distortionY);
+                }
+               
+                if (b.type === 'player') { ctx.shadowColor = '#00ffcc'; ctx.shadowBlur = 30; }
+                else if (b.type === 'black_hole') { ctx.shadowColor = '#ff3366'; ctx.shadowBlur = 30; }
+                else if (b.type === 'white_hole') { ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 35; }
+                else if (b.type === 'star') { ctx.shadowColor = b.isCollapsing ? '#ff3333' : '#ff9900'; ctx.shadowBlur = b.isCollapsing ? 45 : 30; }
+                else if (b.type === 'blue_giant') { ctx.shadowColor = b.isCollapsing ? '#ff3333' : '#00a0ff'; ctx.shadowBlur = b.isCollapsing ? 55 : 40; }
+                else if (b.type === 'comet') { ctx.shadowColor = '#b4dcff'; ctx.shadowBlur = 10; }
+                else if (b.type === 'proton_star') { ctx.shadowColor = '#00f0ff'; ctx.shadowBlur = 35; }
+                else if (b.type === 'pulsar') { ctx.shadowColor = '#783cff'; ctx.shadowBlur = 40; }
+                else if (b.type === 'wormhole') { ctx.shadowColor = '#00ffcc'; ctx.shadowBlur = 25; }
+                else if (b.type === 'planet') { ctx.shadowColor = '#00ff96'; ctx.shadowBlur = 15; }
+                else if (b.type === 'saturn') { ctx.shadowColor = '#eba050'; ctx.shadowBlur = 20; }
+                else { ctx.shadowBlur = 0; ctx.shadowColor = "transparent"; }
+               
+                if (b.type === 'wormhole') {
+                    ctx.globalAlpha = Math.max(0, b.alpha);
+                    let portalGrad = ctx.createRadialGradient(0, 0, b.radius * 0.2, 0, 0, b.radius);
+                    portalGrad.addColorStop(0, 'rgba(0, 0, 0, 0.9)'); portalGrad.addColorStop(0.5, 'rgba(136, 0, 255, 0.3)'); portalGrad.addColorStop(0.85, 'rgba(0, 255, 200, 0.5)'); portalGrad.addColorStop(1, 'rgba(255, 0, 128, 0)');
+                    ctx.fillStyle = portalGrad; ctx.beginPath(); ctx.arc(0, 0, b.radius, 0, Math.PI * 2); ctx.fill();
+                    ctx.strokeStyle = `rgba(0, 255, 200, ${0.7 * Math.max(0, b.alpha)})`; ctx.lineWidth = 3.5 + Math.sin(Date.now() * 0.007) * 1.5; ctx.stroke();
+                    ctx.beginPath(); ctx.arc(0, 0, b.radius * 0.25, 0, Math.PI * 2); ctx.fillStyle = `rgba(255, 255, 255, ${0.8 * Math.max(0, b.alpha)})`; ctx.fill();
+                    ctx.shadowBlur = 0; ctx.fillStyle = '#00ffcc'; let labelSize = Math.max(12, 13 / camera.zoom);
+                    ctx.font = `bold ${labelSize}px sans-serif`; ctx.textAlign = 'center'; ctx.fillText(b.wormholeLabel, 0, labelSize * 0.35);
+                } else if (b.type === 'saturn') {
+                    ctx.save(); if (b.isBeingAbsorbed) ctx.globalAlpha = Math.max(0, b.alpha);
+                    ctx.beginPath(); ctx.arc(0, 0, b.radius, 0, Math.PI * 2); ctx.fillStyle = b.color; ctx.fill();
+                   
+                    ctx.rotate(0.35); ctx.scale(1.8, 0.35); ctx.strokeStyle = 'rgba(235, 190, 120, 0.6)';
+                    ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(0, 0, b.radius * 1.3, 0, Math.PI * 2); ctx.stroke();
+                    ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255, 120, 0, 0.4)'; ctx.beginPath(); ctx.arc(0, 0, b.radius * 1.6, 0, Math.PI * 2); ctx.stroke();
+                    ctx.restore();
+                } else if (b.type === 'proton_star') {
+                    ctx.save(); if (b.isBeingAbsorbed) ctx.globalAlpha = Math.max(0, b.alpha);
+                    ctx.beginPath(); ctx.arc(0, 0, b.radius, 0, Math.PI * 2); ctx.fillStyle = '#00aacc'; ctx.fill();
+                    ctx.rotate(b.diskRotation * 0.3); ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)'; ctx.lineWidth = 1.5; ctx.beginPath();
+                    for(let k=0; k<4; k++) { let angleLine = (k / 4) * Math.PI; ctx.moveTo(Math.cos(angleLine) * b.radius, Math.sin(angleLine) * b.radius); ctx.lineTo(-Math.cos(angleLine) * b.radius, -Math.sin(angleLine) * b.radius); }
+                    ctx.stroke(); ctx.beginPath(); ctx.arc(0, 0, b.radius * 0.4, 0, Math.PI * 2); ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.restore();
+                } else if (b.type === 'blue_giant') {
+                    ctx.save(); if (b.isBeingAbsorbed) ctx.globalAlpha = Math.max(0, b.alpha);
+                    let starGrad = ctx.createRadialGradient(0, 0, b.radius * 0.2, 0, 0, b.radius);
+                    if (b.isCollapsing) { starGrad.addColorStop(0, '#ffffff'); starGrad.addColorStop(0.3, '#ff5555'); starGrad.addColorStop(1, '#990000'); }
+                    else { starGrad.addColorStop(0, '#ffffff'); starGrad.addColorStop(0.2, '#99e0ff'); starGrad.addColorStop(0.6, '#00a0ff'); starGrad.addColorStop(1, '#0044cc'); }
+                    ctx.fillStyle = starGrad; ctx.beginPath(); ctx.arc(0, 0, b.radius, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+                } else {
+                    ctx.save(); if (b.isBeingAbsorbed || b.type === 'supernova_particle') ctx.globalAlpha = Math.max(0, b.alpha);
+                    ctx.beginPath(); ctx.arc(0, 0, b.radius, 0, Math.PI * 2); ctx.fillStyle = b.color; ctx.fill(); ctx.restore();
+                }
+               
+                if (b.type === 'pulsar') { ctx.beginPath(); ctx.arc(0, 0, b.radius * 0.5, 0, Math.PI * 2); ctx.fillStyle = '#ffffff'; ctx.fill(); }
+               
+                if (player && !b.isBeingAbsorbed && b.type !== 'particle' && b.type !== 'supernova_particle' && b.type !== 'comet') {
+                    if (b === player || b.mass > player.mass) {
+                        ctx.scale(1 / b.distortionX, 1 / b.distortionY); ctx.rotate(-b.distortionAngle); ctx.shadowBlur = 0;
+                       
+                        if (b === player) {
+                            ctx.fillStyle = '#00ffcc';
+                        } else if (b.type === 'pulsar') ctx.fillStyle = '#cc88ff';
+                        else if (b.type === 'star') ctx.fillStyle = b.isCollapsing ? '#ff5555' : '#ffea88';
+                        else if (b.type === 'blue_giant') ctx.fillStyle = b.isCollapsing ? '#ff5555' : '#99e0ff';
+                        else if (b.type === 'proton_star') ctx.fillStyle = '#00ffff';
+                        else if (b.type === 'planet') ctx.fillStyle = '#00ff96';
+                        else if (b.type === 'saturn') ctx.fillStyle = '#eba050';
+                        else ctx.fillStyle = '#ff88dd';
+                       
+                        let dynamicFontSize = Math.max(11, 13 / camera.zoom);
+                        ctx.font = `bold ${dynamicFontSize}px sans-serif`; ctx.textAlign = 'center';
+                        ctx.fillText(Math.floor(b.mass), 0, -(b.radius * b.distortionY + 10 / camera.zoom));
+                    }
+                }
+                ctx.restore();
+            }
+            ctx.restore();
+           
+            if (!gameOver && player) {
+                drawRadarIndicator(nearParticle, "rgba(0, 255, 204, 0.75)", "Partícula");
+                drawRadarIndicator(nearComet, "rgba(180, 220, 255, 0.85)", "Cometa");
+                drawRadarIndicator(nearStar, nearStar && nearStar.isCollapsing ? "#ff3333" : (nearStar && nearStar.type === 'blue_giant' ? "#00a0ff" : "rgba(255, 215, 0, 0.85)"), nearStar && nearStar.isCollapsing ? "SUPERNOVA" : (nearStar && nearStar.type === 'blue_giant' ? "G. Azul" : "Estrela"));
+                drawRadarIndicator(nearWhite, "rgba(255, 255, 255, 0.85)", "B.Branco");
+                drawRadarIndicator(nearProton, "#00f0ff", "E.Prótons");
+                if (nearPulsar) drawRadarIndicator(nearPulsar, "#783cff", "PULSAR");
+                if (nearWormhole) drawRadarIndicator(nearWormhole, "#00ffcc", `${nearWormhole.wormholeLabel}`);
+               
+                if (nearPlanet) drawRadarIndicator(nearPlanet, "#00ff96", `Planeta [M:${Math.floor(nearPlanet.mass)}]`);
+                if (nearMoon) drawRadarIndicator(nearMoon, "#aaaaaa", `Lua [M:${Math.floor(nearMoon.mass)}]`);
+                if (nearSaturn) drawRadarIndicator(nearSaturn, "#eba050", `Saturno [M:${Math.floor(nearSaturn.mass)}]`);
+
+                if (nearBot) {
+                    let label = nearBot.mass > player.mass ? "PERIGO BOT" : "PRESA BOT";
+                    drawRadarIndicator(nearBot, nearBot.mass > player.mass ? "#ff3366" : "#ff00aa", `${label} [M:${Math.floor(nearBot.mass)}]`);
+                }
+            }
+            requestAnimationFrame(update);
+        }
+        document.getElementById('btn-restart').addEventListener('click', initGame);
+        initGame();
+        update();
+    </script>
+</body>
+</html>
