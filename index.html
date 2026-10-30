@@ -6,8 +6,37 @@
     <title>Cosmic Eat: Escala Relativa V10.0 - Sistemas Orbitais</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; touch-action: none; }
-        body, html { width: 100%; height: 100%; overflow: hidden; background-color: #000000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        canvas { display: block; width: 100%; height: 100%; }
+        html, body {
+            width: 100%; height: 100%; overflow: hidden; background-color: #000000;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        body { display: flex; align-items: center; justify-content: center; }
+
+        /* Moldura externa: mantém a proporção 9:16 e nunca ultrapassa 90% da tela. */
+        #game-frame {
+            position: relative;
+            width: min(90vw, 50.625vh);
+            height: min(90vh, 160vw);
+            aspect-ratio: 9 / 16;
+            overflow: hidden;
+            background: #000;
+            flex: none;
+        }
+
+        /* Cena lógica fixa; o conjunto inteiro é escalado sem deformação. */
+        #game-scene {
+            position: absolute;
+            width: 360px;
+            height: 640px;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%) scale(var(--scene-scale, 1));
+            transform-origin: center center;
+            overflow: hidden;
+            background: #000;
+        }
+
+        #galaxyCanvas { position: absolute; left: 0; top: 0; display: block; width: 360px; height: 640px; }
        
         #ui-container { position: absolute; top: 15px; left: 15px; display: flex; flex-direction: column; gap: 8px; pointer-events: none; z-index: 15; }        
         .hud-panel { background: rgba(15,15,30,0.85); color: #fff; padding: 10px 15px; border-radius: 6px; border: 1px solid #444477; font-weight: bold; pointer-events: auto; }
@@ -20,11 +49,13 @@
             background: rgba(255, 60, 0, 0.2);
             color: #ff5500;
             border: 2px solid #ff3c00;
-            padding: 12px 30px;
+            max-width: calc(100% - 20px);
+            padding: 10px 14px;
             border-radius: 8px;
-            font-size: 20px;
+            font-size: 15px;
             font-weight: bold;
-            letter-spacing: 2px;
+            letter-spacing: 1px;
+            text-align: center;
             text-shadow: 0 0 10px rgba(255, 60, 0, 0.8);
             box-shadow: inset 0 0 15px rgba(255, 60, 0, 0.3), 0 0 20px rgba(255, 60, 0, 0.2);
             pointer-events: none;
@@ -44,6 +75,8 @@
     </style>
 </head>
 <body>
+    <div id="game-frame">
+      <div id="game-scene">
     <div id="game-over-screen">
         <div>VOCÊ FOI CONSUMIDO!</div>
         <button class="btn-restart" id="btn-restart">Tentar Novamente</button>
@@ -58,14 +91,29 @@
     <div id="event-alert">AVISO: VENTO ESTELAR DETECTADO</div>
    
     <canvas id="galaxyCanvas"></canvas>
+      </div>
+    </div>
     <script>
         const canvas = document.getElementById('galaxyCanvas');
         const ctx = canvas.getContext('2d');
+        const LOGICAL_WIDTH = 360;
+        const LOGICAL_HEIGHT = 640;
+        const gameFrame = document.getElementById('game-frame');
+        const gameScene = document.getElementById('game-scene');
+
         function resizeCanvas() {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
+            // A resolução lógica permanece idêntica em qualquer aparelho.
+            canvas.width = LOGICAL_WIDTH;
+            canvas.height = LOGICAL_HEIGHT;
+
+            // A cena de 360x640 é escalada por igual dentro da moldura 9:16.
+            const scaleX = gameFrame.clientWidth / LOGICAL_WIDTH;
+            const scaleY = gameFrame.clientHeight / LOGICAL_HEIGHT;
+            const sceneScale = Math.min(scaleX, scaleY);
+            gameScene.style.setProperty('--scene-scale', sceneScale);
         }
         window.addEventListener('resize', resizeCanvas);
+        window.addEventListener('orientationchange', resizeCanvas);
         resizeCanvas();
 
         const G = 0.15;
@@ -567,8 +615,13 @@ function spawnOrbitalSystems() {
         window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
 
         function setClickTarget(clientX, clientY) {
-            clickTarget.x = (clientX - canvas.width / 2) / camera.zoom + camera.x;
-            clickTarget.y = (clientY - canvas.height / 2) / camera.zoom + camera.y;
+            // Converte a coordenada física do mouse/toque para o espaço lógico 360x640.
+            const rect = canvas.getBoundingClientRect();
+            const logicalX = (clientX - rect.left) * (LOGICAL_WIDTH / rect.width);
+            const logicalY = (clientY - rect.top) * (LOGICAL_HEIGHT / rect.height);
+
+            clickTarget.x = (logicalX - LOGICAL_WIDTH / 2) / camera.zoom + camera.x;
+            clickTarget.y = (logicalY - LOGICAL_HEIGHT / 2) / camera.zoom + camera.y;
             clickTarget.active = true;
         }
 
